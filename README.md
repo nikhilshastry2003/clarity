@@ -135,6 +135,3 @@ src/*.py ────────┘
 - Python 3.10+
 - An LLM client (configure your own, or use the stub for testing)
 
-## License
-
-MIT
