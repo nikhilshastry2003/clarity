@@ -1,31 +1,31 @@
-# cli.py
+# CLI Module
 
-**Location:** `clarity/cli.py`
+**Location**: `clarity/cli.py`
 
 ## Purpose
 
-The command-line interface entry point for the clarity tool. Orchestrates the full pipeline: reading inputs, running synthesis, and writing the design analysis output.
+The CLI module is the main entry point for Clarity. It orchestrates the full pipeline: parsing arguments, reading inputs, invoking the synthesizer, and writing output.
 
 ## Usage
 
 ```bash
-clarity <task_context.md> [--docs <path>...] [--code <path>...] [--output <path>] [--dry-run]
+clarity <task_context.md> [--docs <files...>] [--code <paths...>] [--output <path>] [--dry-run]
 ```
 
 ### Arguments
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `task_context` | Yes | Path to the task_context.md file |
-| `--docs` | No | Paths to documentation files (markdown) |
-| `--code` | No | Paths to code files or directories |
+| `task_context` | Yes | Path to task_context.md file |
+| `--docs` | No | Paths to markdown documentation files |
+| `--code` | No | Paths to Python files or directories |
 | `--output` | No | Output path (default: `.clarity/scratch/design_analysis.md`) |
 | `--dry-run` | No | Parse inputs only, skip synthesis |
 
 ### Examples
 
 ```bash
-# Basic usage
+# Minimal invocation
 clarity task_context.md
 
 # With documentation
@@ -34,91 +34,70 @@ clarity task_context.md --docs README.md docs/api.md
 # With code
 clarity task_context.md --code src/
 
-# Full pipeline
-clarity task_context.md --docs README.md docs/arch.md --code src/ lib/
+# Full invocation
+clarity task_context.md --docs README.md --code src/ lib/
 
-# Dry run to test parsing
+# Dry run (test parsing)
 clarity task_context.md --docs README.md --code src/ --dry-run
 ```
 
-## Responsibilities
-
-1. Parse command-line arguments using argparse
-2. Validate all input paths exist before processing
-3. Orchestrate the pipeline steps:
-   - Read task context via `read_task_context()`
-   - Read documentation via `read_docs()`
-   - Read code via `read_code()`
-   - Synthesize via `synthesize()`
-   - Write output via `write_design_analysis()`
-4. Handle errors from each pipeline stage gracefully
-5. Print progress messages to stdout, errors to stderr
-
-## Dependencies
-
-- `clarity.readers.read_task_context`
-- `clarity.readers.read_docs`
-- `clarity.readers.read_code`
-- `clarity.agents.synthesize`
-- `clarity.agents.set_llm_client`
-- `clarity.writers.write_design_analysis`
-
-## Functions
+## Key Functions
 
 ### `main(argv: list[str] | None = None) -> int`
 
-Entry point for the CLI application.
+Entry point. Returns 0 on success, 1 on error.
 
-**Parameters:**
-- `argv`: Optional list of command-line arguments. If `None`, uses `sys.argv[1:]`.
-
-**Returns:**
-- `0` on success
-- `1` on any error
+**Pipeline steps**:
+1. Parse arguments
+2. Validate paths
+3. Read task context
+4. Read documentation (if provided)
+5. Read code (if provided)
+6. Synthesize (unless dry-run)
+7. Write output
 
 ### `_create_parser() -> argparse.ArgumentParser`
 
-Creates the argument parser with all supported options.
+Creates the argument parser with all CLI options.
 
-### `_validate_paths(args: argparse.Namespace) -> list[str]`
+### `_validate_paths(args) -> list[str]`
 
-Validates all input paths exist. Returns list of error messages.
+Validates all input paths exist before processing. Returns list of error messages (empty if valid).
+
+## StubLLMClient
+
+When no LLM client is configured, the CLI uses a `StubLLMClient` that returns a placeholder response indicating synthesis was skipped. This allows the pipeline to run without a real LLM for testing purposes.
+
+In production, replace with a real LLM client:
+
+```python
+from clarity.agents import set_llm_client, LLMClient
+
+class OpenAIClient(LLMClient):
+    def complete(self, system_prompt: str, user_content: str) -> str:
+        # Call OpenAI API
+        return response
+
+set_llm_client(OpenAIClient())
+```
+
+## Error Handling
+
+The CLI catches all domain-specific exceptions and converts them to user-friendly error messages:
+
+| Exception | User Message |
+|-----------|--------------|
+| `TaskContextValidationError` | "Task context validation failed: ..." |
+| `DocsReadError` | "Failed to read documentation: ..." |
+| `CodeReadError` | "Failed to read code: ..." |
+| `SynthesisError` | "Synthesis failed: ..." |
+| `WriteError` | "Failed to write output: ..." |
+
+All errors are printed to stderr with exit code 1.
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success - analysis generated |
-| 1 | Error - invalid arguments, missing file, or pipeline failure |
-
-## Output
-
-**On success:**
-```
-Reading task context: task_context.md
-Reading documentation: README.md, docs/api.md
-Reading code: src/
-Running synthesis...
-Writing design analysis: .clarity/scratch/design_analysis.md
-Done! Output: .clarity/scratch/design_analysis.md
-```
-
-**On dry run:**
-```
-Dry run complete - inputs parsed successfully
-  Task: <task description>
-  Docs: N files
-  Code: N files
-```
-
-**On error:**
-```
-Error: <description>
-```
-
-## Notes
-
-- All errors are written to stderr
-- The output directory is created automatically if missing
-- If no LLM client is configured, a stub client is used that produces placeholder output
-- The `--dry-run` flag is useful for testing input parsing without requiring an LLM
+| 0 | Success |
+| 1 | Error (invalid paths, validation failure, synthesis error, write error) |

@@ -1,4 +1,16 @@
-"""Design Analysis Writer - Renders synthesis output to markdown."""
+"""
+Design Analysis Writer - Renders synthesis output to markdown.
+
+This module transforms the synthesizer's structured JSON output into
+human-readable markdown. The rendering is purely deterministic - same
+input dict always produces the exact same markdown output.
+
+The output format prioritizes scannability:
+- Confidence and status prominently displayed at top
+- Numbered sections for easy navigation
+- Bullet lists for quick scanning
+- Code references in backticks for visibility
+"""
 
 from pathlib import Path
 

@@ -1,8 +1,13 @@
 """
 Command-line interface for clarity.
 
-This module provides the main entry point for the clarity CLI tool.
-It orchestrates the full pipeline: read inputs, synthesize analysis, write output.
+This module is the orchestration layer that ties together all components:
+- Readers (deterministic parsing of inputs)
+- Synthesizer (LLM-based reasoning)
+- Writers (deterministic output formatting)
+
+The CLI itself contains no business logic beyond argument parsing and
+error handling. This keeps the core logic testable and reusable.
 
 Usage:
     clarity <task_context.md> --docs <doc1.md> <doc2.md> --code <dir1> <dir2>
@@ -108,8 +113,14 @@ class StubLLMClient(LLMClient):
     """
     Stub LLM client for when no real LLM is configured.
 
-    This produces a placeholder response indicating synthesis was skipped.
-    In production, replace with a real LLM client implementation.
+    This allows the pipeline to run end-to-end without a real LLM,
+    which is useful for:
+    - Testing the full pipeline flow
+    - Demonstrating output format without API costs
+    - CI environments without LLM credentials
+
+    The stub response follows the exact schema expected by the writer,
+    but contains placeholder content indicating no real analysis occurred.
     """
 
     def complete(self, system_prompt: str, user_content: str) -> str:
@@ -179,23 +190,26 @@ def main(argv: list[str] | None = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Step 1: Read task context
+        # Pipeline Step 1: Read task context
+        # This is the developer's intent - what they want to build and their assumptions.
         print(f"Reading task context: {args.task_context}")
         task_ctx = read_task_context(args.task_context)
 
-        # Step 2: Read documentation (if provided)
+        # Pipeline Step 2: Read documentation
+        # Documentation is treated as authoritative system intent (highest evidence priority).
         docs = {"documents": []}
         if args.docs:
             print(f"Reading documentation: {', '.join(args.docs)}")
             docs = read_docs(args.docs)
 
-        # Step 3: Read code (if provided)
+        # Pipeline Step 3: Read code
+        # Code shows "observed reality" - what actually exists, regardless of docs.
         code = {"files": []}
         if args.code:
             print(f"Reading code: {', '.join(args.code)}")
             code = read_code(args.code)
 
-        # Dry run stops here
+        # Dry run: parse-only mode for testing inputs without LLM costs
         if args.dry_run:
             print("Dry run complete - inputs parsed successfully")
             print(f"  Task: {task_ctx.get('task', 'N/A')}")
@@ -203,13 +217,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Code: {len(code.get('files', []))} files")
             return 0
 
-        # Step 4: Synthesize (requires LLM client)
-        # Use stub client if none configured - in production, configure a real one
+        # Pipeline Step 4: Synthesize
+        # Check if a real LLM client is configured; fall back to stub if not.
+        # The stub allows the pipeline to complete but produces placeholder output.
         try:
             from clarity.agents import get_llm_client
             get_llm_client()
         except SynthesisError:
-            # No client configured, use stub
             print("Warning: No LLM client configured, using stub")
             set_llm_client(StubLLMClient())
 

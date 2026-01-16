@@ -1,4 +1,14 @@
-"""Deterministic reader for Python source code files."""
+"""
+Deterministic reader for Python source code files.
+
+This module uses Python's AST (Abstract Syntax Tree) for static analysis,
+meaning NO code is ever executed. This is critical for security - Clarity
+can safely analyze untrusted code without risk of malicious execution.
+
+The reader extracts structural information (functions, classes, imports)
+that the synthesizer uses to understand "observed reality" - what the
+codebase actually contains versus what documentation claims.
+"""
 
 import ast
 from pathlib import Path
@@ -221,10 +231,15 @@ def _build_class_signature(node: ast.ClassDef) -> str:
 
 
 def _build_arguments(args: ast.arguments) -> str:
-    """Build argument list string from ast.arguments."""
+    """Build argument list string from ast.arguments.
+
+    Python's argument system is complex with positional-only, regular,
+    keyword-only, *args, and **kwargs. This function reconstructs the
+    signature string that humans would write, preserving type annotations.
+    """
     parts = []
 
-    # positional-only args (before /)
+    # Positional-only args (Python 3.8+) - appear before the / separator
     posonlyargs = getattr(args, "posonlyargs", [])
     for i, arg in enumerate(posonlyargs):
         parts.append(_format_arg(arg, args.defaults, i, len(args.args) + len(posonlyargs)))
@@ -232,7 +247,9 @@ def _build_arguments(args: ast.arguments) -> str:
     if posonlyargs:
         parts.append("/")
 
-    # regular args
+    # Regular positional/keyword args
+    # Defaults are right-aligned: if there are 3 args and 2 defaults,
+    # defaults apply to args[1] and args[2], not args[0].
     num_defaults = len(args.defaults)
     num_args = len(args.args)
     for i, arg in enumerate(args.args):

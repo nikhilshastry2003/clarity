@@ -1,4 +1,15 @@
-"""Mental Model Synthesizer - First reasoning step in the Clarity pipeline."""
+"""
+Mental Model Synthesizer - The reasoning core of Clarity.
+
+This module is the ONLY place where LLM inference occurs. All other modules
+are purely deterministic. This isolation ensures:
+- Predictable behavior outside the synthesizer
+- Easy testing of readers/writers without LLM mocking
+- Clear responsibility boundaries
+
+The synthesizer makes exactly ONE LLM call per invocation, following the
+principle of minimal inference - gather evidence first, reason once.
+"""
 
 import json
 from pathlib import Path
@@ -31,7 +42,9 @@ class LLMClient:
         raise NotImplementedError("LLM client must be configured")
 
 
-# Global client instance - must be set before use
+# Global client instance - dependency injection pattern.
+# Using a module-level singleton rather than passing through the call stack
+# keeps the synthesize() API clean while still allowing client swapping for tests.
 _llm_client: LLMClient | None = None
 
 
@@ -140,7 +153,16 @@ def _format_docs(docs: dict) -> str:
 
 
 def _format_code(code: dict) -> str:
-    """Format code observations for the prompt."""
+    """Format code observations for the prompt.
+
+    Token management is critical here. Large codebases can easily exceed
+    context limits, so we apply strategic truncation:
+    - Imports: Show first 10 (usually enough to understand dependencies)
+    - Docstrings: Truncate to 200 chars (captures intent without noise)
+    - Methods: Show first 5 per class (covers main functionality)
+
+    These limits balance information density against token budget.
+    """
     lines = ["## Code Observations\n"]
 
     files = code.get("files", [])
@@ -153,11 +175,11 @@ def _format_code(code: dict) -> str:
         path = file.get("path", "unknown")
         lines.append(f"### File: {path}\n")
 
-        # Imports
+        # Imports - capped at 10 to prevent token bloat on large files
         imports = file.get("imports", [])
         if imports:
             lines.append("**Imports:**")
-            for imp in imports[:10]:  # Limit to avoid token overflow
+            for imp in imports[:10]:
                 lines.append(f"- `{imp}`")
             if len(imports) > 10:
                 lines.append(f"- ... and {len(imports) - 10} more")
@@ -235,11 +257,15 @@ def _build_user_content(task_ctx: dict, docs: dict, code: dict) -> str:
 
 
 def _parse_response(response: str) -> dict:
-    """Parse the LLM response as JSON."""
-    # Try to extract JSON from the response
+    """Parse the LLM response as JSON.
+
+    LLMs often wrap JSON in markdown code blocks despite being asked not to.
+    Rather than fighting this behavior, we strip common wrapper patterns.
+    This is more robust than requiring the LLM to be perfectly consistent.
+    """
     response = response.strip()
 
-    # Handle markdown code blocks
+    # Strip markdown code block wrappers - LLMs add these habitually
     if response.startswith("```json"):
         response = response[7:]
     elif response.startswith("```"):
@@ -257,7 +283,13 @@ def _parse_response(response: str) -> dict:
 
 
 def _validate_output(output: dict) -> None:
-    """Validate the synthesis output has required fields."""
+    """Validate the synthesis output has required fields.
+
+    We validate structure rather than content. The LLM might produce empty
+    arrays or minimal summaries, which is valid - it means nothing was
+    found in that category. But missing keys indicate the LLM deviated
+    from the expected format, which would break downstream rendering.
+    """
     required_keys = {
         "system_intent",
         "observed_reality",

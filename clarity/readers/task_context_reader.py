@@ -1,15 +1,60 @@
 """
-Deterministic parser for task_context.md files.
+TaskContextReader - A robust parser for task_context.md files.
 
-This module provides pure, deterministic parsing of markdown task context files.
-No LLM calls are made. Same input always produces same output.
+Expected File Format:
+---------------------
+The parser expects a Markdown file with the following sections:
 
-The parser extracts structured data from markdown sections, preserving original
-text exactly as written without summarization or interpretation.
+Required sections:
+  - Task (or "# Task" or "## Task") - single value
+  - Owned by (or "# Owned by") - single value
+  - What I think I need to do - list section, must have at least 1 item
+
+Optional sections:
+  - What I'm unsure about - list section
+  - Constraints I know - list section
+  - Things I'm assuming (might be wrong) - list section
+
+Section headers can be:
+  - Plain text: "Task:" or "Task:"
+  - Markdown headers: "# Task" or "## Task"
+  - Case-insensitive: "TASK:", "task:", "Task:" all work
+
+List items can use:
+  - Dash bullets: "- item"
+  - Asterisk bullets: "* item"
+  - Numbered lists: "1. item"
+  - Plain paragraphs (non-bullet text under a section)
+
+Example valid file:
+-------------------
+# Task Context
+
+Task: Build a user authentication system
+
+Owned by: Backend Team
+
+What I think I need to do:
+- Implement login endpoint
+- Add JWT token generation
+- Create user session management
+
+What I'm unsure about:
+- OAuth integration details
+- Session timeout requirements
+
+Constraints I know:
+- Must use existing database schema
+- No third-party auth services
+
+Things I'm assuming (might be wrong):
+- Users will have email addresses
+- Single sign-on is not needed
 """
 
 import re
 from pathlib import Path
+from typing import Optional
 
 
 class TaskContextValidationError(Exception):
@@ -22,31 +67,64 @@ class TaskContextValidationError(Exception):
     pass
 
 
-# Section header mappings: markdown header -> output key
-# These are the exact headers the parser looks for (case-sensitive)
-REQUIRED_SECTIONS = {
-    "Task": "task",
-    "Owned by": "owned_by",
-    "What I think I need to do": "planned_approach",
-    "What I'm unsure about": "unknowns",
-    "Constraints I know": "constraints",
-    "Things I'm assuming (might be wrong)": "assumptions",
+# ---------------------------------------------------------------------------
+# Section Configuration
+# ---------------------------------------------------------------------------
+# This configuration-driven approach allows adding new sections without
+# changing parsing logic. Each section defines:
+# - display_name: For error messages (user-facing)
+# - patterns: All acceptable header variations (case-insensitive)
+# - output_key: The key used in the output dictionary
+# - type: 'inline' (single value after colon) or 'list' (bullet points)
+# - required_items: Minimum items for list sections (optional)
+
+SECTION_CONFIG = {
+    'task': {
+        'display_name': 'Task',
+        'patterns': ['task'],
+        'output_key': 'task',
+        'type': 'inline',
+    },
+    'owned_by': {
+        'display_name': 'Owned by',
+        'patterns': ['owned by', 'owner'],
+        'output_key': 'owned_by',
+        'type': 'inline',
+    },
+    'planned_approach': {
+        'display_name': 'What I think I need to do',
+        'patterns': ['what i think i need to do', 'what i need to do'],
+        'output_key': 'planned_approach',
+        'type': 'list',
+        'required_items': 1,
+    },
+    'unknowns': {
+        'display_name': "What I'm unsure about",
+        'patterns': ["what i'm unsure about", "what im unsure about", "unsure about"],
+        'output_key': 'unknowns',
+        'type': 'list',
+    },
+    'constraints': {
+        'display_name': 'Constraints I know',
+        'patterns': ['constraints i know', 'constraints'],
+        'output_key': 'constraints',
+        'type': 'list',
+    },
+    'assumptions': {
+        'display_name': 'Things I\'m assuming (might be wrong)',
+        'patterns': [
+            "things i'm assuming",
+            "things im assuming",
+            "assumptions",
+            "assuming"
+        ],
+        'output_key': 'assumptions',
+        'type': 'list',
+    },
 }
 
-OPTIONAL_SECTIONS = {
-    "Documentation hints": "documentation_hints",
-    "Suspected code areas": "suspected_code_areas",
-}
-
-# Sections that should be parsed as lists (bullet points)
-LIST_SECTIONS = {
-    "planned_approach",
-    "unknowns",
-    "constraints",
-    "assumptions",
-    "documentation_hints",
-    "suspected_code_areas",
-}
+# Fields that are required to be present and non-empty
+REQUIRED_FIELDS = {'task', 'owned_by', 'planned_approach'}
 
 
 def read_task_context(path: str) -> dict:
@@ -68,8 +146,6 @@ def read_task_context(path: str) -> dict:
         - unknowns: list[str] - What the developer is unsure about
         - constraints: list[str] - Known constraints
         - assumptions: list[str] - Assumptions that might be wrong
-        - documentation_hints: list[str] (optional) - Where to look in docs
-        - suspected_code_areas: list[str] (optional) - Suspected relevant code
 
     Raises:
         TaskContextValidationError: If required sections are missing
@@ -84,32 +160,99 @@ def read_task_context(path: str) -> dict:
         raise TaskContextValidationError(f"Path is not a file: {path}")
 
     content = file_path.read_text(encoding="utf-8")
-    return _parse_content(content)
+    lines = content.splitlines()
+
+    return _parse_lines(lines)
 
 
-def _parse_content(content: str) -> dict:
+def _parse_lines(lines: list[str]) -> dict:
     """
-    Parse markdown content into structured sections.
+    Parse lines into a dictionary of field values.
 
-    Extracts sections based on ## headers and maps them to output keys.
-    List sections are parsed as bullet points, text sections are kept as strings.
+    The parsing logic:
+    1. Initialize empty result dict with all fields
+    2. Iterate through each line
+    3. Check if line is a section header (case-insensitive)
+    4. For inline sections: extract value from same line or next non-empty line
+    5. For list sections: collect bullet points and plain paragraphs
+
+    Args:
+        lines: Raw lines from the file
+
+    Returns:
+        Dictionary with parsed field values
     """
-    sections = _extract_sections(content)
+    # Initialize result with default empty values.
+    # All fields start empty so missing optional sections return empty lists,
+    # which is cleaner than None for downstream processing.
+    result = {
+        'task': '',
+        'owned_by': '',
+        'planned_approach': [],
+        'unknowns': [],
+        'constraints': [],
+        'assumptions': [],
+    }
 
-    # Build result dict from required sections
-    result = {}
+    # State machine: tracks which section we're currently inside.
+    # This allows collecting multi-line content under a single heading.
+    current_section: Optional[str] = None
 
-    for header, key in REQUIRED_SECTIONS.items():
-        raw_content = sections.get(header, "")
-        if key in LIST_SECTIONS:
-            result[key] = _parse_list(raw_content)
-        else:
-            result[key] = raw_content.strip()
+    # For inline sections like "Task: Build X", the value might be on the
+    # same line (after the colon) or on the next line. This flag tells us
+    # to capture the next non-empty line as the value.
+    waiting_for_inline_value: Optional[str] = None
 
-    # Add optional sections if present
-    for header, key in OPTIONAL_SECTIONS.items():
-        if header in sections:
-            result[key] = _parse_list(sections[header])
+    for line in lines:
+        # Clean the line - strip whitespace
+        trimmed = line.strip() if line else ''
+
+        # Skip completely empty lines
+        if not trimmed:
+            continue
+
+        # Skip document title lines (e.g., "# Task Context")
+        if _is_document_title(trimmed):
+            continue
+
+        # Check if this line is a section header
+        detected_section = _detect_section_header(trimmed)
+
+        if detected_section is not None:
+            # We found a new section header
+            current_section = detected_section
+            section_config = SECTION_CONFIG[detected_section]
+            output_key = section_config['output_key']
+
+            if section_config['type'] == 'inline':
+                # For inline sections, try to extract value from this line
+                inline_value = _extract_inline_value(trimmed)
+                if inline_value:
+                    result[output_key] = inline_value
+                    waiting_for_inline_value = None
+                else:
+                    # Value might be on the next line
+                    waiting_for_inline_value = output_key
+            else:
+                # List section - reset to empty list and prepare to collect items
+                result[output_key] = []
+                waiting_for_inline_value = None
+
+        elif waiting_for_inline_value is not None:
+            # We're waiting for an inline value from previous header
+            result[waiting_for_inline_value] = trimmed
+            waiting_for_inline_value = None
+
+        elif current_section is not None:
+            # We're inside a section, collect content
+            section_config = SECTION_CONFIG[current_section]
+            output_key = section_config['output_key']
+
+            if section_config['type'] == 'list':
+                # Collect list items
+                item = _extract_list_item(trimmed)
+                if item:
+                    result[output_key].append(item)
 
     # Validate required fields
     _validate(result)
@@ -117,58 +260,170 @@ def _parse_content(content: str) -> dict:
     return result
 
 
-def _extract_sections(content: str) -> dict:
+def _normalize_apostrophes(text: str) -> str:
     """
-    Extract sections from markdown content based on ## headers.
+    Normalize various apostrophe characters to ASCII apostrophe.
 
-    Sections are identified by level-2 headers (##). Content between
-    one header and the next (or end of file) belongs to that section.
+    WHY: Text editors and word processors often auto-replace straight quotes
+    with "smart" curly quotes. When users copy-paste from such sources or
+    type on mobile keyboards, the file may contain Unicode apostrophes.
+    Normalizing them ensures "What I'm" matches "What I'm" regardless of
+    which apostrophe character was used.
+
+    Args:
+        text: Text that may contain Unicode apostrophes
+
+    Returns:
+        Text with all apostrophe variants normalized to ASCII (')
     """
-    sections = {}
-
-    # Match ## headers (level 2 only)
-    header_pattern = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-    matches = list(header_pattern.finditer(content))
-
-    for i, match in enumerate(matches):
-        section_name = match.group(1).strip()
-        start = match.end()
-        # Section ends at next header or end of content
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
-        section_content = content[start:end].strip()
-        sections[section_name] = section_content
-
-    return sections
+    apostrophe_chars = [
+        '\u2019',  # RIGHT SINGLE QUOTATION MARK (') - common in Word/macOS
+        '\u2018',  # LEFT SINGLE QUOTATION MARK (') - opening quote
+        '\u0060',  # GRAVE ACCENT (`) - sometimes used as apostrophe
+        '\u00B4',  # ACUTE ACCENT (´) - common on international keyboards
+        '\u201A',  # SINGLE LOW-9 QUOTATION MARK (‚) - European usage
+    ]
+    result = text
+    for char in apostrophe_chars:
+        result = result.replace(char, "'")
+    return result
 
 
-def _parse_list(content: str) -> list[str]:
+def _strip_markdown_header(line: str) -> str:
     """
-    Parse content as a list of bullet points.
+    Remove markdown header markers (# ## ### etc.).
 
-    Supports both dash (-) and asterisk (*) bullet markers,
-    as well as numbered lists (1., 2., etc.).
-    Only extracts top-level bullets; nested bullets are ignored.
+    Args:
+        line: Line that may start with # markers
+
+    Returns:
+        The text content after stripping markers
     """
-    if not content:
-        return []
+    return line.lstrip('#').strip()
 
-    items = []
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
 
-        # Match bullet points (-, *)
-        bullet_match = re.match(r"^[-*]\s+(.+)$", stripped)
-        # Match numbered lists (1., 2., etc.)
-        numbered_match = re.match(r"^\d+\.\s+(.+)$", stripped)
+def _is_document_title(trimmed_line: str) -> bool:
+    """
+    Check if a line is a document title (not a section header).
 
-        if bullet_match:
-            items.append(bullet_match.group(1))
-        elif numbered_match:
-            items.append(numbered_match.group(1))
+    Document titles are markdown headers like "# Task Context" that
+    don't match any known section pattern.
 
-    return items
+    Args:
+        trimmed_line: The trimmed line to check
+
+    Returns:
+        True if this is a document title, False otherwise
+    """
+    # Only consider lines that start with # as potential titles
+    if not trimmed_line.startswith('#'):
+        return False
+
+    # Extract the text after the # markers
+    header_text = _strip_markdown_header(trimmed_line)
+    normalized = _normalize_apostrophes(header_text).lower()
+
+    # Check if this matches any known section
+    for section_config in SECTION_CONFIG.values():
+        for pattern in section_config['patterns']:
+            if normalized.startswith(pattern):
+                return False
+
+    # Markdown header that doesn't match any section = document title
+    return True
+
+
+def _detect_section_header(trimmed_line: str) -> Optional[str]:
+    """
+    Detect if a line is a known section header.
+
+    Handles multiple formats:
+    - Plain text: "Task:" or "Task"
+    - Markdown: "## Task" or "# Task:"
+    - Case variations: "TASK:", "task:", "Task:"
+    - Unicode apostrophes: "What I'm" matches "What I'm"
+
+    Args:
+        trimmed_line: The trimmed line to check
+
+    Returns:
+        Field name if this is a section header, None otherwise
+    """
+    # Normalize the line for comparison
+    normalized = _strip_markdown_header(trimmed_line)
+    normalized = _normalize_apostrophes(normalized)
+    check_text = normalized.lower()
+
+    # Try to match against each section's patterns
+    for field_name, config in SECTION_CONFIG.items():
+        for pattern in config['patterns']:
+            if check_text.startswith(pattern):
+                # Verify it's actually a header
+                remaining = check_text[len(pattern):]
+                if (not remaining or
+                        remaining.startswith(':') or
+                        remaining.startswith(' ')):
+                    return field_name
+
+    return None
+
+
+def _extract_inline_value(trimmed_line: str) -> str:
+    """
+    Extract the inline value from a section header line.
+
+    For lines like "Task: Build authentication", extracts "Build authentication".
+
+    Args:
+        trimmed_line: The header line
+
+    Returns:
+        Extracted value, or empty string if none found
+    """
+    text = _strip_markdown_header(trimmed_line)
+    colon_pos = text.find(':')
+    if colon_pos == -1:
+        return ''
+    return text[colon_pos + 1:].strip()
+
+
+def _extract_list_item(trimmed_line: str) -> Optional[str]:
+    """
+    Extract a list item from a line.
+
+    Handles:
+    - Dash bullets: "- item text"
+    - Asterisk bullets: "* item text"
+    - Numbered lists: "1. item text"
+    - Plain paragraphs (non-bullet, non-header text)
+
+    Args:
+        trimmed_line: The trimmed line
+
+    Returns:
+        Extracted item text, or None if line is not a valid item
+    """
+    # Check for dash bullets
+    if trimmed_line.startswith('- '):
+        item = trimmed_line[2:].strip()
+        return item if item else None
+
+    # Check for asterisk bullets
+    if trimmed_line.startswith('* '):
+        item = trimmed_line[2:].strip()
+        return item if item else None
+
+    # Check for numbered lists
+    numbered_match = re.match(r'^\d+\.\s+(.+)$', trimmed_line)
+    if numbered_match:
+        return numbered_match.group(1)
+
+    # Check for plain paragraph (non-empty, non-header text)
+    if trimmed_line and not trimmed_line.startswith('#'):
+        if _detect_section_header(trimmed_line) is None:
+            return trimmed_line
+
+    return None
 
 
 def _validate(result: dict) -> None:
@@ -182,16 +437,23 @@ def _validate(result: dict) -> None:
     """
     errors = []
 
-    # Task and owned_by are required text fields
-    if not result.get("task"):
-        errors.append("'Task' section is required and cannot be empty")
+    for field_name in REQUIRED_FIELDS:
+        config = SECTION_CONFIG[field_name]
+        display_name = config['display_name']
+        output_key = config['output_key']
+        value = result.get(output_key)
 
-    if not result.get("owned_by"):
-        errors.append("'Owned by' section is required and cannot be empty")
+        if config['type'] == 'inline':
+            if not value or not str(value).strip():
+                errors.append(f"'{display_name}' section is required and cannot be empty")
 
-    # Planned approach must have at least one item
-    if not result.get("planned_approach"):
-        errors.append("'What I think I need to do' must contain at least one item")
+        elif config['type'] == 'list':
+            min_items = config.get('required_items', 0)
+            actual_items = len(value) if value else 0
+            if actual_items < min_items:
+                errors.append(
+                    f"'{display_name}' must contain at least {min_items} item(s)"
+                )
 
     if errors:
         raise TaskContextValidationError("; ".join(errors))

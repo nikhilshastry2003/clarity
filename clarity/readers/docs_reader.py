@@ -1,4 +1,15 @@
-"""Deterministic parser for Markdown documentation files."""
+"""
+Deterministic parser for Markdown documentation files.
+
+This reader extracts document structure based on headings (# ## ###).
+Each section tracks its line numbers to enable precise citations in
+the synthesizer output - when the LLM says "see docs/api.md:10-15",
+it's using these line numbers.
+
+Only headings up to level 3 are treated as section delimiters.
+Deeper headings (####) become part of the section content, which
+prevents over-fragmentation of documents.
+"""
 
 import re
 from pathlib import Path
