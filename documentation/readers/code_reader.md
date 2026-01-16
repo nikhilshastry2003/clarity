@@ -6,13 +6,23 @@
 
 Reads Python source code files and extracts structural information using AST (Abstract Syntax Tree) parsing. This provides the synthesizer with code observations without executing any code.
 
-## Input
+Code observations represent **observed reality** - what the codebase actually contains, regardless of what documentation claims.
 
-A list of paths to:
-- Individual Python files (`.py`)
-- Directories (recursively searches for `.py` files)
+## Inputs & Outputs
 
-## Output Structure
+### Inputs
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `paths` | `list[str]` | List of paths to Python files or directories |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| Code dict | `dict` | Dictionary with `files` key containing parsed file info |
+
+### Output Schema
 
 ```python
 {
@@ -49,15 +59,54 @@ A list of paths to:
 }
 ```
 
+## Responsibilities
+
+The code_reader is responsible for:
+
+1. **File discovery** - Find all `.py` files in directories (recursive)
+2. **AST parsing** - Parse Python source without execution
+3. **Function extraction** - Extract name, signature, docstring, lines
+4. **Class extraction** - Extract name, signature, bases, methods
+5. **Import extraction** - Record import statements
+6. **Line tracking** - Record start/end line numbers for citations
+
+## What This Module Must NOT Do
+
+The code_reader must NOT:
+
+1. **Execute code** - CRITICAL: No `exec()`, `eval()`, or imports of target code
+2. **Interpret semantics** - Only structure, not meaning
+3. **Perform reasoning** - That's the synthesizer's job
+4. **Modify files** - Read-only operation
+5. **Parse non-Python** - Only `.py` files supported
+6. **Follow imports** - Does not resolve or analyze imported modules
+
+## Dependencies
+
+### Internal Dependencies
+
+None - this is a leaf module.
+
+### External Dependencies
+
+- `ast` - Python AST parsing (stdlib)
+- `pathlib.Path` - Path operations (stdlib)
+- `dataclasses` - Data class definitions (stdlib)
+
 ## Key Functions
 
 ### `read_code(paths: list[str]) -> dict`
 
 Main entry point. Processes all provided paths.
 
+**Parameters**:
+- `paths`: List of file or directory paths
+
 **Behavior**:
 - For files: Parses if `.py` extension
 - For directories: Recursively finds all `.py` files
+
+**Returns**: Dictionary with `files` key containing parsed file info
 
 **Raises**:
 - `FileNotFoundError`: Path does not exist
@@ -87,18 +136,9 @@ Formats function arguments including:
 - `*args` and `**kwargs`
 - Keyword-only args
 
-## AST Parsing Details
+### `_extract_import(node) -> list[str]`
 
-The reader uses Python's `ast` module for static analysis:
-
-```python
-tree = ast.parse(source, filename=str(path))
-```
-
-This means:
-- **No code execution** - safe to parse untrusted code
-- **Syntax errors are caught** - reported as `CodeReadError`
-- **Type annotations preserved** - using `ast.unparse()`
+Extracts import statements as human-readable strings.
 
 ## Data Classes
 
@@ -139,6 +179,23 @@ class FileInfo:
     classes: list[ClassInfo]
     imports: list[str]
 ```
+
+All classes implement `to_dict()` methods for serialization.
+
+## Security: No Code Execution
+
+This is a critical safety feature. The reader uses Python's `ast` module:
+
+```python
+tree = ast.parse(source, filename=str(path))
+```
+
+This means:
+- **No code execution** - Safe to parse untrusted/malicious code
+- **Syntax errors are caught** - Reported as `CodeReadError`
+- **Type annotations preserved** - Using `ast.unparse()`
+
+You can safely run Clarity against any Python codebase without risk of executing malicious code.
 
 ## Example
 
@@ -191,12 +248,18 @@ async def verify_token(token: str) -> Optional[dict]:
                         {
                             "name": "__init__",
                             "signature": "def __init__(self, secret: str)",
-                            ...
+                            "docstring": None,
+                            "line_start": 9,
+                            "line_end": 10,
+                            "is_async": False
                         },
                         {
                             "name": "create_token",
                             "signature": "def create_token(self, user_id: int) -> str",
-                            ...
+                            "docstring": "Create a new JWT token.",
+                            "line_start": 12,
+                            "line_end": 14,
+                            "is_async": False
                         }
                     ],
                     "bases": []
@@ -210,3 +273,38 @@ async def verify_token(token: str) -> Optional[dict]:
     ]
 }
 ```
+
+## Failure Modes
+
+| Exception | Cause |
+|-----------|-------|
+| `FileNotFoundError` | Path does not exist |
+| `CodeReadError("Path is neither file nor directory: ...")` | Invalid path type |
+| `CodeReadError("Failed to read file X: ...")` | Cannot read file (permissions) |
+| `CodeReadError("Syntax error in X: ...")` | Python syntax error in source file |
+
+## Known Limitations
+
+1. **Python only** - Does not support other languages (JS, Go, etc.)
+2. **Top-level only** - Nested functions/classes inside functions are not extracted
+3. **No type resolution** - Type annotations are strings, not resolved types
+4. **No control flow analysis** - Does not understand what code does, just structure
+5. **No comment extraction** - Only docstrings, not inline comments
+6. **UTF-8 only** - Other encodings will fail
+7. **No .pyi stub files** - Does not merge type stubs
+
+## Argument Handling
+
+The `_build_arguments()` function reconstructs Python's complex argument syntax:
+
+```
+def foo(pos_only, /, regular, *args, kw_only, **kwargs)
+```
+
+- Positional-only args: Before `/` (Python 3.8+)
+- Regular args: With optional defaults
+- `*args`: Variable positional
+- Keyword-only args: After `*` or `*args`
+- `**kwargs`: Variable keyword
+
+Defaults are right-aligned: if 3 args have 2 defaults, defaults apply to args 2 and 3.
